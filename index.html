@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#ffffff">
+<title>QuickDrop — Private file transfer</title>
+<style>
+:root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#171717;background:#fafafa}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;padding:32px 18px}
+main{max-width:900px;margin:0 auto}.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:34px}
+.brand{font-weight:750;font-size:21px;letter-spacing:-.7px}.brand span{color:#777;font-weight:500}
+.pill{font-size:12px;border:1px solid #e5e5e5;border-radius:30px;padding:7px 11px;color:#666;background:white}
+h1{font-size:clamp(30px,5vw,46px);letter-spacing:-1.8px;line-height:1.08;margin:0 0 12px}
+.sub{color:#737373;margin:0 0 28px;line-height:1.5}
+.layout{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.card{background:white;border:1px solid #e8e8e8;border-radius:18px;padding:22px;box-shadow:0 3px 15px #00000005}
+.card h2{font-size:16px;margin:0 0 6px}.muted{color:#777;font-size:13px;line-height:1.5}
+.qrwrap{display:grid;place-items:center;min-height:225px;margin:18px 0;background:#fafafa;border:1px dashed #ddd;border-radius:14px;padding:14px}
+#qrcode{background:white;padding:12px;border-radius:10px;min-width:180px;min-height:180px;display:grid;place-items:center}
+#qrcode img,#qrcode canvas{max-width:100%;height:auto!important}
+.status{display:flex;align-items:center;gap:8px;font-size:13px;color:#555}
+.dot{width:8px;height:8px;border-radius:50%;background:#bbb}.dot.ok{background:#16a34a}
+button,.filebtn{border:0;border-radius:10px;padding:12px 15px;font-weight:650;font-size:14px;cursor:pointer;background:#171717;color:white}
+button.secondary{background:#f1f1f1;color:#222}.actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}
+.drop{border:1px dashed #d2d2d2;background:#fcfcfc;border-radius:14px;padding:22px;text-align:center;margin-top:17px}
+.drop strong{display:block;margin-bottom:6px;font-size:14px}.drop input{display:none}
+.filebtn{display:inline-block;margin-top:12px}
+#connectionLabel{overflow-wrap:anywhere}
+.transfers{margin-top:16px}.transfer{border-top:1px solid #eee;padding:12px 0;font-size:13px}
+.transferhead{display:flex;justify-content:space-between;gap:12px}.transfer small{color:#777}
+progress{width:100%;height:7px;margin-top:9px;accent-color:#171717}
+.notice{margin-top:18px;padding:13px 15px;background:#f1f1f1;border-radius:12px;color:#666;font-size:12px;line-height:1.55}
+footer{text-align:center;color:#999;font-size:12px;margin:26px 0 0}
+@media(max-width:680px){body{padding:22px 14px}.layout{grid-template-columns:1fr}.top{margin-bottom:28px}.card{padding:18px}}
+</style>
+</head>
+<body>
+<main>
+  <div class="top"><div class="brand">QuickDrop <span> / file transfer</span></div><div class="pill">No account needed</div></div>
+  <h1>Move files.<br>Not cables.</h1>
+  <p class="sub">Connect your phone and computer with a QR code. Send files directly between devices.</p>
+
+  <section class="layout">
+    <div class="card">
+      <h2>1. Connect your phone</h2>
+      <p class="muted">Open this page on your computer, then scan this QR code with your phone.</p>
+      <div class="qrwrap"><div id="qrcode"><span class="muted">Creating your private session…</span></div></div>
+      <div class="status"><span class="dot" id="dot"></span><span id="statusText">Starting connection…</span></div>
+      <div class="actions">
+        <button class="secondary" id="copyLink">Copy phone link</button>
+        <button class="secondary" id="newSession">New session</button>
+      </div>
+      <p class="muted" id="connectionLabel" style="margin-top:12px"></p>
+    </div>
+
+    <div class="card">
+      <h2>2. Send files both ways</h2>
+      <p class="muted">Once your devices are connected, choose files on either device. The other device will receive them.</p>
+      <div class="drop">
+        <strong>Choose files to send</strong>
+        <div class="muted">Photos, videos, documents and more</div>
+        <label class="filebtn" for="fileInput">Select files</label>
+        <input id="fileInput" type="file" multiple>
+      </div>
+      <div class="transfers" id="transfers"><p class="muted">Your transfer activity will appear here.</p></div>
+    </div>
+  </section>
+  <div class="notice"><strong>Privacy:</strong> File contents travel directly between your devices using WebRTC; this webpage does not upload them to a storage server. The QR link acts like a temporary invitation, so only share it with the device you intend to connect. Use a trusted network and close the page when finished. This prototype uses public PeerJS signalling infrastructure to establish the connection.</div>
+  <footer>QuickDrop · A lightweight browser-to-browser transfer prototype</footer>
+</main>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  let peer, conn, peerId = null, connected = false, currentIncoming = null;
+  const CHUNK = 16 * 1024;
+  const activeTransfers = new Map();
+
+  function status(message, ok=false) {
+    $('statusText').textContent = message;
+    $('dot').className = 'dot' + (ok ? ' ok' : '');
+  }
+  function addTransfer(name, direction, detail='Preparing…') {
+    const id = 't' + Math.random().toString(36).slice(2);
+    const wrap = document.createElement('div'); wrap.className='transfer';
+    const head=document.createElement('div'); head.className='transferhead';
+    const nm=document.createElement('strong'); nm.textContent=name;
+    const st=document.createElement('span'); st.textContent=detail;
+    const small=document.createElement('small'); small.textContent=direction;
+    const prog=document.createElement('progress'); prog.max=100; prog.value=0;
+    head.append(nm,st); wrap.append(head,small,prog); $('transfers').prepend(wrap);
+    return {id, st, prog};
+  }
+  function setTransfer(t, pct, label) { t.prog.value=pct; t.st.textContent=label; }
+  function makePeer() {
+    if (peer) { try { peer.destroy(); } catch(e){} }
+    conn=null; connected=false; peerId=null;
+    $('qrcode').innerHTML='';
+    status('Starting connection…');
+    peer = new Peer(undefined, {debug:0});
+    peer.on('open', id => {
+      peerId=id;
+      const url = new URL(location.href);
+      url.searchParams.set('connect', id);
+      url.hash='';
+      const link=url.toString();
+      new QRCode($('qrcode'), {text:link,width:180,height:180,correctLevel:QRCode.CorrectLevel.M});
+      $('connectionLabel').textContent='Session ready · '+id;
+      status('Waiting for your phone…');
+    });
+    peer.on('connection', incoming => {
+      if (conn && conn.open) { incoming.close(); return; }
+      conn=incoming; wireConnection(conn);
+    });
+    peer.on('error', err => status('Connection error: '+err.type+' — refresh to retry'));
+    peer.on('disconnected', () => status('Signalling disconnected. Refresh this page to retry.'));
+  }
+  function wireConnection(c) {
+    c.on('open', () => {
+      connected=true;
+      status('Phone connected — ready to transfer', true);
+      $('connectionLabel').textContent='Connected device · '+c.peer;
+    });
+    c.on('data', data => receiveData(data));
+    c.on('close', () => { connected=false; status('Device disconnected. Scan the QR code to reconnect.'); });
+    c.on('error', () => status('Transfer connection interrupted.'));
+  }
+  function connectFromPhone(target) {
+    status('Connecting to computer…');
+    conn=peer.connect(target, {reliable:true,serialization:'binary'});
+    wireConnection(conn);
+  }
+  function receiveData(data) {
+    if (typeof data === 'string') {
+      let msg; try { msg=JSON.parse(data); } catch(e) { return; }
+      if (msg.type==='file-start') {
+        currentIncoming={name:msg.name,size:msg.size,mime:msg.mime||'application/octet-stream',chunks:[],received:0,transfer:addTransfer(msg.name,'Receiving','0%')};
+      } else if (msg.type==='file-end' && currentIncoming) {
+        const f=currentIncoming;
+        const blob=new Blob(f.chunks,{type:f.mime});
+        const a=document.createElement('a'); const url=URL.createObjectURL(blob);
+        a.href=url; a.download=f.name; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(()=>URL.revokeObjectURL(url),60000);
+        setTransfer(f.transfer,100,'Received');
+        currentIncoming=null;
+      }
+    } else if (currentIncoming && data instanceof ArrayBuffer) {
+      const f=currentIncoming; f.chunks.push(data); f.received+=data.byteLength;
+      const pct=f.size ? Math.min(100,Math.round(f.received/f.size*100)) : 100;
+      setTransfer(f.transfer,pct,pct+'%');
+    } else if (currentIncoming && data instanceof Blob) {
+      const f=currentIncoming; f.chunks.push(data); f.received+=data.size;
+      const pct=f.size ? Math.min(100,Math.round(f.received/f.size*100)) : 100;
+      setTransfer(f.transfer,pct,pct+'%');
+    }
+  }
+  async function sendFiles(files) {
+    if (!conn || !conn.open) { alert('Connect your phone and computer first.'); return; }
+    for (const file of files) {
+      const t=addTransfer(file.name,'Sending','0%');
+      conn.send(JSON.stringify({type:'file-start',name:file.name,size:file.size,mime:file.type}));
+      let offset=0;
+      while(offset<file.size) {
+        const chunk=file.slice(offset,offset+CHUNK);
+        const buffer=await chunk.arrayBuffer();
+        // Wait for the peer connection's buffered data to drain to avoid overwhelming mobile browsers.
+        while(conn && conn.open && conn.dataChannel && conn.dataChannel.bufferedAmount > 1024*1024) {
+          await new Promise(r=>setTimeout(r,40));
+        }
+        if (!conn || !conn.open) { setTransfer(t,Math.round(offset/file.size*100),'Interrupted'); return; }
+        conn.send(buffer);
+        offset+=buffer.byteLength;
+        const pct=file.size ? Math.round(offset/file.size*100) : 100;
+        setTransfer(t,pct,pct+'%');
+      }
+      conn.send(JSON.stringify({type:'file-end'}));
+      setTransfer(t,100,'Sent');
+    }
+  }
+  $('fileInput').addEventListener('change', async e => {
+    await sendFiles(Array.from(e.target.files||[])); e.target.value='';
+  });
+  $('copyLink').addEventListener('click', async () => {
+    if (!peerId) return;
+    const u=new URL(location.href); u.searchParams.set('connect',peerId); u.hash='';
+    try { await navigator.clipboard.writeText(u.toString()); status('Phone link copied',connected); }
+    catch(e) { prompt('Copy this link to your phone:',u.toString()); }
+  });
+  $('newSession').addEventListener('click', () => {
+    const u=new URL(location.href); u.searchParams.delete('connect'); history.replaceState({},'',u);
+    makePeer();
+  });
+  makePeer();
+  // When a phone opens a QR invitation, create its own peer and connect to the computer.
+  const target = new URLSearchParams(location.search).get('connect');
+  if (target) {
+    const wait=setInterval(() => {
+      if (peer && peer.open) { clearInterval(wait); connectFromPhone(target); }
+    },100);
+    setTimeout(()=>clearInterval(wait),15000);
+  }
+})();
+</script>
+</body>
+</html>
